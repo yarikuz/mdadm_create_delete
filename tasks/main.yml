@@ -1,11 +1,164 @@
 ---
 # tasks file for mdadm_create_delete
 
-- name: debian | Installing mdadm
+- name: Installing mdadm
   apt:
     name: "mdadm"
     state: "present"
+  tags: install_mdadm
 
-- name: arrays | Set update_initramfs cmd to update-initramfs -u
-  set_fact:
-    update_initramfs: "update-initramfs -u"
+# - name: arrays | Set update_initramfs cmd to update-initramfs -u
+#   set_fact:
+#     update_initramfs: "update-initramfs -u"
+
+- name: arrays | Checking Status Of Array(s)
+  shell: "cat /proc/mdstat | grep {{ item.name }}"
+  register: "array_check"
+  changed_when: false
+  failed_when: false
+  with_items: '{{ mdadm_arrays }}'
+  check_mode: no
+  # tags: array_check
+
+
+- name: arrays | Creating Array(s)
+  shell: "yes | mdadm --create /dev/{{ item.name }} --level={{ item.level }} --raid-devices={{ item.devices|count }} {{ item.devices| join (' ') }}"
+  register: "array_created"
+  with_items: '{{ mdadm_arrays }}'
+  when: >
+        item.state|lower == "present" and
+        array_check.results[0].rc != 0
+  # tags: create_array
+
+- name: arrays | Updating Initramfs
+  command: "{{ update_initramfs }}"
+  when: array_created.changed
+
+- name: arrays | Capturing Array Details
+  command: "mdadm --detail --scan"
+  register: "array_details"
+  changed_when: false
+  # tags: create_array
+
+- name: arrays | Creating Array(s) Filesystem
+  filesystem:
+    fstype: "{{ item.filesystem }}"
+    opts: "{{ item.filesystem_opts | default(omit) }}"
+    dev: "/dev/{{ item.name }}"
+  with_items: '{{ mdadm_arrays }}'
+  when:
+  - item.state|lower == "present"
+  - item.filesystem is defined
+  # tags: create_array
+
+# - name: get UUID
+#   command: "lsblk /dev/{{ item.name }} -no UUID"
+#   register: "disk_uuid"
+#   with_items: '{{ mdadm_arrays }}'
+#   tags: uuid
+
+- name: arrays | Mounting Array(s)
+  mount:
+    name: "{{ item.mountpoint }}"
+    src: "/dev/{{ item.name }}"
+    # src: UUID=disk_uuid
+    fstype: "{{ item.filesystem }}"
+    state: "mounted"
+    opts: "{{ item.opts | default(omit) }}"
+  with_items: '{{ mdadm_arrays }}'
+  when:
+  - item.state|lower == "present"
+  - item.filesystem is defined
+  - item.mountpoint is defined
+  # tags: create_array
+
+# Unmounting raid arrays in preparation of destroying
+- name: arrays | Unmounting Array(s)
+  mount:
+    name: "{{ item.mountpoint }}"
+    src: "/dev/{{ item.name }}"
+    # src: UUID=disk_uuid
+    state: "unmounted"
+  with_items: '{{ mdadm_arrays }}'
+  when:
+  - item.state|lower == "absent"
+  - item.mountpoint is defined
+  # tags: delete_array
+
+# Stopping raid arrays in preparation of destroying
+- name: arrays | Stopping Array(s)
+  command: "mdadm --stop /dev/{{ item.name }}"
+  register: "array_stopped"
+  with_items: '{{ mdadm_arrays }}'
+  when: >
+        item.state|lower == "absent" and
+        array_check.results[0].rc == 0
+  # tags: delete_array
+
+# Removing raid arrays
+# - name: arrays | Removing Array(s)
+#   command: "mdadm --remove /dev/{{ item.name }}"
+#   register: "array_removed"
+#   with_items: '{{ mdadm_arrays }}'
+#   when: >
+#         item.state|lower == "absent" and
+#         array_check.results[0].rc == 0
+#   # tags: delete_array
+
+# Zeroing out the disk devices which were part of the raid array
+- name: arrays | Zeroing Out Array Devices
+  command: "mdadm --zero-superblock {{ item.1 }}"
+  with_subelements:
+    - '{{ mdadm_arrays }}'
+    - devices
+  when: >
+        item.0.state|lower == "absent" and
+        array_check.results[0].rc == 0 and
+        array_stopped.changed
+  # tags: delete_array
+
+# Wiping out the disk devices which were part of the raid array
+- name: arrays | Wiping Out Array Devices
+  command: "wipefs -af {{ item.1 }}"
+  with_subelements:
+    - '{{ mdadm_arrays }}'
+    - devices
+  when: >
+        item.0.state|lower == "absent" and
+        array_check.results[0].rc == 0 and
+        array_stopped.changed
+  # tags: delete_array
+
+- name: arrays | Ensure /etc/mdadm/ directory exists
+  file:
+    path: /etc/mdadm/
+    state: directory
+
+- name: arrays | Ensure /etc/mdadm/mdadm.conf file exists
+  copy:
+    content: ""
+    dest: /etc/mdadm/mdadm.conf
+    force: no
+
+# Updating /etc/mdadm/mdadm.conf in order to persist between reboots
+- name: arrays | Updating /etc/mdadm/mdadm.conf
+  lineinfile:
+    dest: "/etc/mdadm/mdadm.conf"
+    regexp: "^{{ item }}"
+    line: "{{ item }}"
+    state: "present"
+  with_items: '{{ array_details.stdout_lines }}'
+  when: array_created.changed
+  # tags: create_array
+
+# Updating /etc/mdadm/mdadm.conf in order to not persist between reboots
+- name: arrays | Updating /etc/mdadm/mdadm.conf
+  lineinfile:
+    dest: "/etc/mdadm/mdadm.conf"
+    regexp: "^ARRAY /dev/{{ item.name }}"
+    line: "ARRAY /dev/{{ item.name }}"
+    state: "absent"
+  with_items: '{{ mdadm_arrays }}'
+  when: >
+        item.state == "absent"
+  # tags: delete_array
