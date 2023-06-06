@@ -7,8 +7,8 @@ Role Name
 Role Variables
 --------------
 
-Для создания массива в файле defaults/main.yml - state: 'present'
-Для удаления массива defaults/main.yml - state: 'absent'
+Для создания массива в файле defaults/main.yml - state: 'present',
+для удаления defaults/main.yml - state: 'absent'
 
 Example Playbook
 ----------------
